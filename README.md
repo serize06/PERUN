@@ -1,4 +1,4 @@
-# PERUN ⚡
+# PERUN
 
 PERUN is a lightweight, security-hardened Windows **PE32+ (64-bit AMD64)** console executable loader and runtime library designed to run natively on Linux x86_64. 
 
@@ -6,7 +6,7 @@ Written strictly using the C99 standard and POSIX APIs, PERUN handles PE headers
 
 ---
 
-## 🚀 Key Features
+## Key Features
 
 ### 1. Phase 1 - PE File Integrity & Structure Parsing (PE Parser)
 * **DOS Header Validation:** Verifies the `MZ (0x5A4D)` magic number at the beginning of the file.
@@ -32,7 +32,7 @@ Written strictly using the C99 standard and POSIX APIs, PERUN handles PE headers
 
 ---
 
-## 📁 Directory Structure
+## Directory Structure
 
 ```text
 PERUN/
@@ -55,7 +55,7 @@ PERUN/
 
 ---
 
-## 🛠️ Build Instructions
+## Build Instructions
 
 To build the project on a Linux x86_64 system, make sure `CMake` and `make` are installed:
 
@@ -75,7 +75,7 @@ Upon a successful build, the `build/perun` binary will be created.
 
 ---
 
-## 🖥️ Usage
+## Usage
 
 ### 1. Dump PE Header & Sections Info (`--info`)
 Print essential DOS/NT header metadata and the list of sections in a readable format:
@@ -118,7 +118,7 @@ Mapped Sections:
 
 ---
 
-## 📐 Mathematical Relocation Verification
+## Mathematical Relocation Verification
 
 * **Setup:** The testing script (`generate_dummy_pe.py`) injects a **64-bit absolute pointer `0x140002000`** (which corresponds to the compiler's preferred `ImageBase` `0x140000000` + `.data` section `RVA 0x2000`) into the `.text` section at offset `0x10`.
 * **Delta Computation:** If the Linux OS maps the image at address `0x7a969e5ca000`, the loader computes the delta offset:
