@@ -1,0 +1,6 @@
+build/
+tests/dummy.exe
+.vscode/
+*.o
+*.a
+*.so
