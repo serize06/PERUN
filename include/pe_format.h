@@ -161,6 +161,37 @@ typedef struct {
 #define IMAGE_REL_BASED_ABSOLUTE              0
 #define IMAGE_REL_BASED_DIR64                 10
 
+// Import Directory Descriptor
+typedef struct {
+    union {
+        uint32_t Characteristics;
+        uint32_t OriginalFirstThunk; // RVA to Import Lookup Table (ILT)
+    } DUMMYUNIONNAME;
+    uint32_t TimeDateStamp;
+    uint32_t ForwarderChain;
+    uint32_t Name;                // RVA to ASCII string containing DLL name
+    uint32_t FirstThunk;          // RVA to Import Address Table (IAT)
+} IMAGE_IMPORT_DESCRIPTOR;
+
+// 64-bit Import Thunk Data
+typedef struct {
+    union {
+        uint64_t ForwarderString;
+        uint64_t Function;
+        uint64_t Ordinal;
+        uint64_t AddressOfData;   // RVA to IMAGE_IMPORT_BY_NAME
+    } u1;
+} IMAGE_THUNK_DATA64;
+
+// Import By Name Structure
+typedef struct {
+    uint16_t Hint;
+    uint8_t  Name[1];             // Null-terminated ASCII string (variable size)
+} IMAGE_IMPORT_BY_NAME;
+
+// 64-bit Ordinal Flag (Highest bit set to 1)
+#define IMAGE_ORDINAL_FLAG64 0x8000000000000000ULL
+
 #pragma pack(pop)
 
 #endif // PE_FORMAT_H

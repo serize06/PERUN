@@ -4,6 +4,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdarg.h>
 
 int pe_loader_init(pe_loader_context *ctx, pe_parser_context *parser_ctx) {
     if (!ctx || !parser_ctx || !parser_ctx->nt_headers) {
@@ -182,6 +183,111 @@ int pe_loader_relocate(pe_loader_context *ctx) {
     return 0;
 }
 
+__attribute__((ms_abi)) static void mock_ExitProcess(uint32_t exit_code) {
+    printf("[Mock API] ExitProcess called with code: %u\n", exit_code);
+    exit((int)exit_code);
+}
+
+__attribute__((ms_abi)) static int mock_printf(const char *format, ...) {
+    va_list args;
+    va_start(args, format);
+    printf("[Mock API] printf called: ");
+    int ret = vprintf(format, args);
+    va_end(args);
+    return ret;
+}
+
+int pe_loader_resolve_imports(pe_loader_context *ctx) {
+    if (!ctx || !ctx->loaded_base || !ctx->parser_ctx) {
+        return -1;
+    }
+
+    pe_parser_context *parser = ctx->parser_ctx;
+    IMAGE_OPTIONAL_HEADER64 *opt_hdr = &parser->nt_headers->OptionalHeader;
+    IMAGE_DATA_DIRECTORY *import_dir = &opt_hdr->DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+
+    if (import_dir->VirtualAddress == 0 || import_dir->Size == 0) {
+        printf("No import directory found.\n");
+        return 0;
+    }
+
+    printf("Resolving Imports...\n");
+
+    IMAGE_IMPORT_DESCRIPTOR *desc = (IMAGE_IMPORT_DESCRIPTOR *)pe_loader_rva_to_va(ctx, import_dir->VirtualAddress);
+    if (!desc) {
+        fprintf(stderr, "[Error] Import directory RVA 0x%x is out of image bounds\n", import_dir->VirtualAddress);
+        return -1;
+    }
+
+    // Traverse descriptors until we find an entry where all fields are zero (null descriptor)
+    while (desc->Name != 0 || desc->FirstThunk != 0) {
+        char *dll_name = (char *)pe_loader_rva_to_va(ctx, desc->Name);
+        if (!dll_name) {
+            fprintf(stderr, "[Error] DLL Name RVA 0x%x is out of bounds\n", desc->Name);
+            return -1;
+        }
+
+        printf("Importing from DLL: %s\n", dll_name);
+
+        // OriginalFirstThunk (ILT) and FirstThunk (IAT)
+        uint32_t ilt_rva = desc->DUMMYUNIONNAME.OriginalFirstThunk ? desc->DUMMYUNIONNAME.OriginalFirstThunk : desc->FirstThunk;
+        IMAGE_THUNK_DATA64 *ilt = (IMAGE_THUNK_DATA64 *)pe_loader_rva_to_va(ctx, ilt_rva);
+        IMAGE_THUNK_DATA64 *iat = (IMAGE_THUNK_DATA64 *)pe_loader_rva_to_va(ctx, desc->FirstThunk);
+
+        if (!ilt || !iat) {
+            fprintf(stderr, "[Error] ILT or IAT is out of bounds for DLL: %s\n", dll_name);
+            return -1;
+        }
+
+        // Loop through ILT and IAT entries (both arrays are NULL-terminated)
+        while (ilt->u1.AddressOfData != 0) {
+            uint64_t resolved_addr = 0;
+
+            // Ordinal check
+            if (ilt->u1.Ordinal & IMAGE_ORDINAL_FLAG64) {
+                uint16_t ordinal = ilt->u1.Ordinal & 0xFFFF;
+                printf("  [Ordinal] #%u -> Mapped to default mock address\n", ordinal);
+                // Map to mock_ExitProcess as fallback
+                resolved_addr = (uint64_t)mock_ExitProcess;
+            } else {
+                // Name check
+                IMAGE_IMPORT_BY_NAME *imp_name = (IMAGE_IMPORT_BY_NAME *)pe_loader_rva_to_va(ctx, (uint32_t)ilt->u1.AddressOfData);
+                if (!imp_name) {
+                    fprintf(stderr, "[Error] Import name RVA 0x%lx is out of bounds\n", ilt->u1.AddressOfData);
+                    return -1;
+                }
+                
+                char *func_name = (char *)imp_name->Name;
+                printf("  [Function] %s ", func_name);
+
+                // Map mock address based on function name
+                if (strcmp(func_name, "ExitProcess") == 0) {
+                    resolved_addr = (uint64_t)mock_ExitProcess;
+                    printf("-> Resolved to mock_ExitProcess (%p)\n", (void *)resolved_addr);
+                } else if (strcmp(func_name, "printf") == 0) {
+                    resolved_addr = (uint64_t)mock_printf;
+                    printf("-> Resolved to mock_printf (%p)\n", (void *)resolved_addr);
+                } else {
+                    // Fallback stub
+                    resolved_addr = (uint64_t)mock_ExitProcess;
+                    printf("-> Resolved to mock_ExitProcess (Fallback, %p)\n", (void *)resolved_addr);
+                }
+            }
+
+            // Write the resolved address to the IAT
+            iat->u1.Function = resolved_addr;
+
+            ilt++;
+            iat++;
+        }
+
+        desc++;
+    }
+
+    printf("Successfully resolved all imports.\n");
+    return 0;
+}
+
 int pe_loader_apply_protections(pe_loader_context *ctx) {
     if (!ctx || !ctx->loaded_base || !ctx->parser_ctx) {
         return -1;
@@ -220,6 +326,40 @@ int pe_loader_apply_protections(pe_loader_context *ctx) {
             return -1;
         }
     }
+
+    return 0;
+}
+
+int pe_loader_execute(pe_loader_context *ctx) {
+    if (!ctx || !ctx->loaded_base || !ctx->parser_ctx) {
+        return -1;
+    }
+
+    uint32_t entry_rva = ctx->parser_ctx->nt_headers->OptionalHeader.AddressOfEntryPoint;
+    if (entry_rva == 0) {
+        fprintf(stderr, "[Error] Entry point RVA is 0, cannot execute.\n");
+        return -1;
+    }
+
+    void *entry_va = pe_loader_rva_to_va(ctx, entry_rva);
+    if (!entry_va) {
+        fprintf(stderr, "[Error] Entry point RVA 0x%x is out of image bounds\n", entry_rva);
+        return -1;
+    }
+
+    printf("Executing Entry Point (VA: %p)...\n\n", entry_va);
+
+    // Cast Entry Point address to ms_abi function pointer (using union to avoid pedantic warnings)
+    typedef void (__attribute__((ms_abi)) *pe_entry_fn)(void);
+    union {
+        void *va;
+        pe_entry_fn fn;
+    } cast;
+    cast.va = entry_va;
+    pe_entry_fn entry = cast.fn;
+
+    // Transfer execution control to the PE image entry point
+    entry();
 
     return 0;
 }

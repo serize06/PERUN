@@ -118,6 +118,14 @@ int main(int argc, char **argv) {
             return 1;
         }
 
+        if (pe_loader_resolve_imports(&ctx.loader) != 0) { // resolve import address table
+            fprintf(stderr, "[Error] Resolving imports failed\n");
+            pe_loader_free(&ctx.loader);
+            free(buffer);
+            buffer = NULL;
+            return 1;
+        }
+
         if (pe_loader_apply_protections(&ctx.loader) != 0) { // apply page protection
             fprintf(stderr, "[Error] Applying memory protections failed\n");
             pe_loader_free(&ctx.loader);
@@ -149,6 +157,21 @@ int main(int argc, char **argv) {
                 uint64_t *ptr = (uint64_t *)((uint8_t *)va + 0x10);
                 printf("    -> [Debug] Value at .text+0x10 (relocated ptr): %p (expected to match .data VA)\n", (void *)*ptr);
             }
+            
+            // Debug check for the IAT resolution inside the .idata section
+            if (strcmp(name, ".idata") == 0) {
+                uint64_t *ptr = (uint64_t *)((uint8_t *)va + 0x40);
+                printf("    -> [Debug] Value at .idata+0x40 (resolved IAT entry): %p\n", (void *)*ptr);
+            }
+        }
+
+        printf("\nStarting execution flow...\n");
+        if (pe_loader_execute(&ctx.loader) != 0) {
+            fprintf(stderr, "[Error] Executing entry point failed\n");
+            pe_loader_free(&ctx.loader);
+            free(buffer);
+            buffer = NULL;
+            return 1;
         }
 
         pe_loader_free(&ctx.loader);

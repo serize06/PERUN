@@ -27,7 +27,7 @@ def generate_dummy_pe(filepath):
     file_header = struct.pack(
         '<HHIIIHH',
         0x8664, # Machine (AMD64)
-        3,      # NumberOfSections (text, data, reloc)
+        4,      # NumberOfSections (text, data, reloc, idata)
         0x65F0EF00, # TimeDateStamp (dummy value)
         0,      # PointerToSymbolTable
         0,      # NumberOfSymbols
@@ -49,7 +49,7 @@ def generate_dummy_pe(filepath):
         0x020B,     # Magic: 0x020B (PE32+)
         14, 0,      # MajorLinkerVersion, MinorLinkerVersion
         0x200,      # SizeOfCode
-        0x400,      # SizeOfInitializedData (data=0x200, reloc=0x200)
+        0x600,      # SizeOfInitializedData (data=0x200, reloc=0x200, idata=0x200)
         0,          # SizeOfUninitializedData
         0x1000,     # AddressOfEntryPoint (RVA)
         0x1000,     # BaseOfCode
@@ -62,7 +62,7 @@ def generate_dummy_pe(filepath):
         0, 0,        # MajorImageVersion, MinorImageVersion
         10, 0,       # MajorSubsystemVersion, MinorSubsystemVersion
         0,           # Win32VersionValue
-        0x4000,      # SizeOfImage
+        0x5000,      # SizeOfImage
         0x200,       # SizeOfHeaders
         0,           # CheckSum
         3,           # Subsystem (IMAGE_SUBSYSTEM_WINDOWS_CUI)
@@ -76,9 +76,13 @@ def generate_dummy_pe(filepath):
     )
     
     # Data Directories (16 entries, each 8 bytes)
+    # Directory Index 1 is Import Directory
     # Directory Index 5 is Base Relocation Table
+    # Directory Index 12 is Import Address Table
     dirs = [[0, 0] for _ in range(16)]
-    dirs[5] = [0x3000, 12] # Relocation table at RVA 0x3000, Size 12
+    dirs[1] = [0x4000, 40]  # Import directory at RVA 0x4000, Size 40
+    dirs[5] = [0x3000, 12]  # Relocation table at RVA 0x3000, Size 12
+    dirs[12] = [0x4040, 16] # IAT at RVA 0x4040, Size 16
     flat_dirs = [val for entry in dirs for val in entry]
     data_directories = struct.pack('<' + 'II'*16, *flat_dirs)
     
@@ -126,16 +130,42 @@ def generate_dummy_pe(filepath):
         0, 0,       # NumberOfRelocations, NumberOfLinenumbers
         0x42000040  # Characteristics (Data, Discardable, Read)
     )
+
+    # Section 4: .idata (VirtualSize=0x200, VirtualAddress=0x4000, SizeOfRawData=0x200, PointerToRawData=0x800)
+    # Characteristics: 0xC0000040 (CNT_INITIALIZED_DATA | MEM_READ | MEM_WRITE)
+    sec_idata = struct.pack(
+        '<8s IIIIIIHHI',
+        b'.idata\0\0',
+        0x200,      # VirtualSize
+        0x4000,     # VirtualAddress
+        0x200,      # SizeOfRawData
+        0x800,      # PointerToRawData
+        0, 0,       # PointerToRelocations, PointerToLinenumbers
+        0, 0,       # NumberOfRelocations, NumberOfLinenumbers
+        0xC0000040  # Characteristics (Data, Read, Write)
+    )
     
     # Headers total size must align to FileAlignment (0x200)
-    headers = dos_header + nt_signature + file_header + optional_header + sec_text + sec_data + sec_reloc
+    headers = dos_header + nt_signature + file_header + optional_header + sec_text + sec_data + sec_reloc + sec_idata
     # Pad headers to 0x200 bytes
     headers += b'\0' * (0x200 - len(headers))
     
     # Section data
     # .text section data (offset 0x200 to 0x400)
-    # Put a 64-bit absolute address 0x140002000 at offset 0x10
-    text_data = b'\x90' * 16 + struct.pack('<Q', 0x140002000) + b'\x90' * (512 - 16 - 8)
+    # RVA 0x1000. Contains code that executes ExitProcess(42) and retains relocation check at offset 0x10.
+    code = (
+        b'\xeb\x16' +                # jmp to offset 0x18 (2 bytes)
+        b'\x90' * 14 +               # padding to offset 0x10 (14 bytes)
+        struct.pack('<Q', 0x140002000) +  # offset 0x10: relocated address for reloc test (8 bytes)
+        # offset 0x18 (RVA 0x1018):
+        b'\x48\x83\xec\x28' +        # sub rsp, 40
+        b'\x48\xc7\xc1\x2a\x00\x00\x00' +  # mov rcx, 42
+        b'\x48\x8b\x05\x16\x30\x00\x00' +  # mov rax, [rip + 0x3016] (points to IAT at 0x4040)
+        b'\xff\xd0' +                # call rax
+        b'\x48\x83\xc4\x28' +        # add rsp, 40
+        b'\xc3'                      # ret
+    )
+    text_data = code + b'\x90' * (512 - len(code))
     
     # .data section data (offset 0x400 to 0x600)
     data_data = b'Hello from PERUN mock PE!' + b'\0' * (512 - len('Hello from PERUN mock PE!'))
@@ -147,12 +177,41 @@ def generate_dummy_pe(filepath):
     # Entries: 0xA010 (DIR64 at offset 0x10), 0x0000 (ABSOLUTE padding)
     reloc_data = struct.pack('<IIHH', 0x1000, 12, 0xA010, 0x0000)
     reloc_data += b'\0' * (512 - len(reloc_data))
+
+    # .idata section data (offset 0x800 to 0xa00)
+    # Layout:
+    # 0x00: IDT Entry 1 (kernel32.dll)
+    #   - OriginalFirstThunk (ILT RVA): 0x4030
+    #   - TimeDateStamp: 0
+    #   - ForwarderChain: 0
+    #   - Name RVA: 0x4050
+    #   - FirstThunk (IAT RVA): 0x4040
+    # 0x14: IDT Entry 2 (NULL)
+    # 0x28: padding to 0x30
+    # 0x30: ILT (ExitProcess IMAGE_IMPORT_BY_NAME RVA: 0x4060, NULL)
+    # 0x40: IAT (ExitProcess IMAGE_IMPORT_BY_NAME RVA: 0x4060, NULL)
+    # 0x50: DLL Name: "kernel32.dll\0"
+    # 0x60: IMAGE_IMPORT_BY_NAME for ExitProcess (Hint: 0, Name: "ExitProcess\0")
+    idt_entry1 = struct.pack('<IIIII', 0x4030, 0, 0, 0x4050, 0x4040)
+    idt_entry2 = struct.pack('<IIIII', 0, 0, 0, 0, 0)
+    ilt = struct.pack('<QQ', 0x4060, 0)
+    iat = struct.pack('<QQ', 0x4060, 0)
+    
+    dll_name = b'kernel32.dll\0'
+    dll_name += b'\0' * (16 - len(dll_name))
+    
+    hint_name = struct.pack('<H', 0) + b'ExitProcess\0'
+    hint_name += b'\0' * (16 - len(hint_name))
+    
+    idata_data = idt_entry1 + idt_entry2 + b'\0'*8 + ilt + iat + dll_name + hint_name
+    idata_data += b'\0' * (512 - len(idata_data))
     
     with open(filepath, 'wb') as f:
         f.write(headers)
         f.write(text_data)
         f.write(data_data)
         f.write(reloc_data)
+        f.write(idata_data)
         
     print(f"Successfully generated dummy PE at {filepath}")
 

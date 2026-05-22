@@ -14,7 +14,9 @@ typedef struct {
 int pe_loader_init(pe_loader_context *ctx, pe_parser_context *parser_ctx);
 int pe_loader_map(pe_loader_context *ctx);
 int pe_loader_relocate(pe_loader_context *ctx);
+int pe_loader_resolve_imports(pe_loader_context *ctx);
 int pe_loader_apply_protections(pe_loader_context *ctx);
+int pe_loader_execute(pe_loader_context *ctx);
 void *pe_loader_rva_to_va(const pe_loader_context *ctx, uint32_t rva);
 void pe_loader_free(pe_loader_context *ctx);
 
