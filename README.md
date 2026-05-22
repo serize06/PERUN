@@ -26,7 +26,16 @@ Written strictly using the C99 standard and POSIX APIs, PERUN handles PE headers
 * **64-bit Address Patching:** Decodes 16-bit relocation entries and adds the computed delta to absolute 64-bit pointers (`IMAGE_REL_BASED_DIR64`).
 * **Out-of-Bounds (OOB) Defense:** Performs strict boundary verification on block sizes, block counts, and target RVAs to prevent arbitrary memory write vulnerabilities.
 
-### 4. Security-Hardened Design
+### 4. Phase 4 - Import Address Table (IAT) & DLL Resolver
+* **Import Directory Parsing:** Navigates the `IMAGE_DIRECTORY_ENTRY_IMPORT` data directory to traverse the DLL import descriptors and lookup tables (ILT).
+* **Mock Stub Engine:** Integrates native C mock stubs (e.g., `mock_ExitProcess`, `mock_printf`) to intercept and handle calls intended for Windows system libraries on Linux.
+* **IAT Binding:** Patches the Import Address Table (IAT) with the actual addresses of the resolved mock functions in memory before execution.
+
+### 5. Phase 5 - EntryPoint Execution & Calling Convention Mapping
+* **ABI Calling Convention Bridge:** Interposes the Microsoft x64 calling convention (`ms_abi`) for all mock function definitions, resolving register mismatches (`RCX` vs `RDI`) between PE binary execution and Linux host execution.
+* **ISO C Compliant Execution:** Transitions execution control to the mapped PE `AddressOfEntryPoint` using ISO C compliant union type casts to bypass `-Wpedantic` warnings.
+
+### 6. Security-Hardened Design
 * **Format String Protection:** Ensures error logging and console reporting functions (`printf`, `fprintf`) always use static format strings, protecting the application against format string exploits from input filenames.
 * **UAF & Double-Free Mitigation:** Immediately assigns `NULL` to file streams and memory buffers after closing or freeing them (`fclose`, `free`) to prevent Use-After-Free (UAF) and Double-Free vectors.
 
@@ -88,41 +97,65 @@ Machine: x86_64
 Format: PE32+
 ImageBase: 0x140000000
 EntryPoint RVA: 0x1000
-Number of sections: 3
+Number of sections: 4
 
 Sections:
 .text    RVA=0x1000   RAW=0x200    SIZE=0x200   
 .data    RVA=0x2000   RAW=0x400    SIZE=0x100   
 .reloc   RVA=0x3000   RAW=0x600    SIZE=0x200   
+.idata   RVA=0x4000   RAW=0x800    SIZE=0x200   
 ```
 
-### 2. Map and Apply Relocation (Default Execution Mode)
-Simulate mapping, applying page-level permissions, and patching base relocation references:
+### 2. Map, Relocate, Resolve Imports, and Execute (Default Execution Mode)
+Simulate mapping, applying base relocation, binding resolved IAT functions, and executing the entry point of the PE:
 ```bash
 ./build/perun tests/dummy.exe
 ```
 *Example Output:*
 ```text
-Applying Relocation (Delta: 0x7a955e5ca000)...
+Applying Relocation (Delta: 0x7069f6244000)...
 Successfully applied relocations.
+Resolving Imports...
+Importing from DLL: kernel32.dll
+  [Function] ExitProcess -> Resolved to mock_ExitProcess (0x57a1cde8783e)
+Successfully resolved all imports.
 Successfully mapped and loaded PE in memory!
-Allocated Base VA: 0x7a969e5ca000
-SizeOfImage: 0x4000
+Allocated Base VA: 0x706b36244000
+SizeOfImage: 0x5000
 
 Mapped Sections:
-  .text    RVA=0x1000   -> Memory VA=0x7a969e5cb000 (Size=0x200   )
-    -> [Debug] Value at .text+0x10 (relocated ptr): 0x7a969e5cc000 (expected to match .data VA)
-  .data    RVA=0x2000   -> Memory VA=0x7a969e5cc000 (Size=0x100   )
-  .reloc   RVA=0x3000   -> Memory VA=0x7a969e5cd000 (Size=0x200   )
+  .text    RVA=0x1000   -> Memory VA=0x706b36245000 (Size=0x200   )
+    -> [Debug] Value at .text+0x10 (relocated ptr): 0x706b36246000 (expected to match .data VA)
+  .data    RVA=0x2000   -> Memory VA=0x706b36246000 (Size=0x100   )
+  .reloc   RVA=0x3000   -> Memory VA=0x706b36247000 (Size=0x200   )
+  .idata   RVA=0x4000   -> Memory VA=0x706b36248000 (Size=0x200   )
+    -> [Debug] Value at .idata+0x40 (resolved IAT entry): 0x57a1cde8783e
+
+Starting execution flow...
+Executing Entry Point (VA: 0x706b36245000)...
+
+[Mock API] ExitProcess called with code: 42
 ```
 
 ---
 
-## Mathematical Relocation Verification
+## Integration and Calling Convention Verification
 
-* **Setup:** The testing script (`generate_dummy_pe.py`) injects a **64-bit absolute pointer `0x140002000`** (which corresponds to the compiler's preferred `ImageBase` `0x140000000` + `.data` section `RVA 0x2000`) into the `.text` section at offset `0x10`.
-* **Delta Computation:** If the Linux OS maps the image at address `0x7a969e5ca000`, the loader computes the delta offset:
-  $$\text{Delta} = 0x7a969e5ca000 - 0x140000000 = 0x7a955e5ca000$$
+### 1. Mathematical Relocation Verification
+* **Setup:** The testing script (`generate_dummy_pe.py`) injects a **64-bit absolute pointer `0x140002000`** (ImageBase `0x140000000` + `.data` section RVA `0x2000`) into the `.text` section at offset `0x10`.
+* **Delta Computation:** If the loader maps the image at address `0x706b36244000`, the delta offset is computed as:
+  $$\text{Delta} = 0x706b36244000 - 0x140000000 = 0x7069f6244000$$
 * **Patch Application:** The relocation engine adds this delta to the absolute pointer at `.text` offset `0x10`:
-  $$\text{Patched Value} = 0x140002000 + 0x7a955e5ca000 = 0x7a969e5cc000$$
-* **Verification:** The patched value (`0x7a969e5cc000`) matches the actual absolute virtual memory address where the `.data` section was mapped (`Memory VA = 0x7a969e5cc000`). This demonstrates that the loader's mapping offsets and relocation tables are patched with 100% mathematical precision.
+  $$\text{Patched Value} = 0x140002000 + 0x7069f6244000 = 0x706b36246000$$
+* **Verification:** The patched value (`0x706b36246000`) matches the actual absolute virtual memory address where the `.data` section was mapped (`Memory VA = 0x706b36246000`).
+
+### 2. ABI Calling Convention Mapping
+
+* **Objective:** Allow C-based mock functions compiled for System V ABI (Linux x64) to receive parameters properly from Windows x64 binaries calling them.
+* **Solution:** We apply `__attribute__((ms_abi))` to all mock function interfaces (e.g. `mock_ExitProcess`).
+* **Execution Flow:**
+  1. The entry point of `dummy.exe` executes code that sets up parameters under Microsoft x64 calling convention:
+     * Sets the first parameter `rcx` to `42`.
+  2. The code loads the `ExitProcess` address from the resolved IAT at `0x4040` (value `0x57a1cde8783e`) and performs a call.
+  3. The control transitions to `mock_ExitProcess`. The function parses `rcx` as the exit code parameter, logs `ExitProcess called with code: 42`, and calls `exit(42)`.
+  4. The program successfully exits with code `42`, proving that IAT resolution, memory protections, and execution flow are correctly mapped.
