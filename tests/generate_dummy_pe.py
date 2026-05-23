@@ -80,9 +80,9 @@ def generate_dummy_pe(filepath):
     # Directory Index 5 is Base Relocation Table
     # Directory Index 12 is Import Address Table
     dirs = [[0, 0] for _ in range(16)]
-    dirs[1] = [0x4000, 40]  # Import directory at RVA 0x4000, Size 40
+    dirs[1] = [0x4000, 60]  # Import directory at RVA 0x4000, Size 60 (3 entries)
     dirs[5] = [0x3000, 12]  # Relocation table at RVA 0x3000, Size 12
-    dirs[12] = [0x4040, 16] # IAT at RVA 0x4040, Size 16
+    dirs[12] = [0x4060, 32] # IAT at RVA 0x4060, Size 32 (16 bytes for kernel32 IAT, 16 for msvcrt IAT)
     flat_dirs = [val for entry in dirs for val in entry]
     data_directories = struct.pack('<' + 'II'*16, *flat_dirs)
     
@@ -159,8 +159,12 @@ def generate_dummy_pe(filepath):
         struct.pack('<Q', 0x140002000) +  # offset 0x10: relocated address for reloc test (8 bytes)
         # offset 0x18 (RVA 0x1018):
         b'\x48\x83\xec\x28' +        # sub rsp, 40
+        b'\x48\x8d\x0d\xdd\x0f\x00\x00' +  # lea rcx, [rip + 0xfdd] -> 0x2000 (format string)
+        b'\x48\x8d\x15\xf6\x0f\x00\x00' +  # lea rdx, [rip + 0xff6] -> 0x2020 (arg string)
+        b'\x48\x8b\x05\x4f\x30\x00\x00' +  # mov rax, [rip + 0x304f] -> 0x4080 (printf IAT)
+        b'\xff\xd0' +                # call rax
         b'\x48\xc7\xc1\x2a\x00\x00\x00' +  # mov rcx, 42
-        b'\x48\x8b\x05\x16\x30\x00\x00' +  # mov rax, [rip + 0x3016] (points to IAT at 0x4040)
+        b'\x48\x8b\x05\x1f\x30\x00\x00' +  # mov rax, [rip + 0x301f] -> 0x4060 (ExitProcess IAT)
         b'\xff\xd0' +                # call rax
         b'\x48\x83\xc4\x28' +        # add rsp, 40
         b'\xc3'                      # ret
@@ -168,7 +172,10 @@ def generate_dummy_pe(filepath):
     text_data = code + b'\x90' * (512 - len(code))
     
     # .data section data (offset 0x400 to 0x600)
-    data_data = b'Hello from PERUN mock PE!' + b'\0' * (512 - len('Hello from PERUN mock PE!'))
+    # RVA 0x2000: format string, RVA 0x2020: argument string
+    fmt_str = b'PERUN Loader: %s\n\0'
+    arg_str = b'Execution Successful!\0'
+    data_data = fmt_str + b'\0' * (32 - len(fmt_str)) + arg_str + b'\0' * (512 - 32 - len(arg_str))
 
     # .reloc section data (offset 0x600 to 0x800)
     # 1 relocation block:
@@ -181,29 +188,57 @@ def generate_dummy_pe(filepath):
     # .idata section data (offset 0x800 to 0xa00)
     # Layout:
     # 0x00: IDT Entry 1 (kernel32.dll)
-    #   - OriginalFirstThunk (ILT RVA): 0x4030
+    #   - OriginalFirstThunk (ILT RVA): 0x4050
     #   - TimeDateStamp: 0
     #   - ForwarderChain: 0
-    #   - Name RVA: 0x4050
-    #   - FirstThunk (IAT RVA): 0x4040
-    # 0x14: IDT Entry 2 (NULL)
-    # 0x28: padding to 0x30
-    # 0x30: ILT (ExitProcess IMAGE_IMPORT_BY_NAME RVA: 0x4060, NULL)
-    # 0x40: IAT (ExitProcess IMAGE_IMPORT_BY_NAME RVA: 0x4060, NULL)
-    # 0x50: DLL Name: "kernel32.dll\0"
-    # 0x60: IMAGE_IMPORT_BY_NAME for ExitProcess (Hint: 0, Name: "ExitProcess\0")
-    idt_entry1 = struct.pack('<IIIII', 0x4030, 0, 0, 0x4050, 0x4040)
-    idt_entry2 = struct.pack('<IIIII', 0, 0, 0, 0, 0)
-    ilt = struct.pack('<QQ', 0x4060, 0)
-    iat = struct.pack('<QQ', 0x4060, 0)
+    #   - Name RVA: 0x4090
+    #   - FirstThunk (IAT RVA): 0x4060
+    # 0x14: IDT Entry 2 (msvcrt.dll)
+    #   - OriginalFirstThunk (ILT RVA): 0x4070
+    #   - TimeDateStamp: 0
+    #   - ForwarderChain: 0
+    #   - Name RVA: 0x40A0
+    #   - FirstThunk (IAT RVA): 0x4080
+    # 0x28: IDT Entry 3 (NULL)
+    # 0x3C: Padding/align to 0x50 (20 bytes padding)
+    # 0x50: ILT for kernel32 (ExitProcess IMAGE_IMPORT_BY_NAME RVA: 0x40B0, NULL) -> 16 bytes (ends at 0x4060)
+    # 0x60: IAT for kernel32 (ExitProcess IMAGE_IMPORT_BY_NAME RVA: 0x40B0, NULL) -> 16 bytes (ends at 0x4070)
+    # 0x70: ILT for msvcrt (printf IMAGE_IMPORT_BY_NAME RVA: 0x40C0, NULL) -> 16 bytes (ends at 0x4080)
+    # 0x80: IAT for msvcrt (printf IMAGE_IMPORT_BY_NAME RVA: 0x40C0, NULL) -> 16 bytes (ends at 0x4090)
+    # 0x90: Name string: "kernel32.dll\0" (ends at 0x409D) -> pad to 0x40A0
+    # 0xA0: Name string: "msvcrt.dll\0" (ends at 0x40AB) -> pad to 0x40B0
+    # 0xB0: IMAGE_IMPORT_BY_NAME for ExitProcess (Hint: 0, Name: "ExitProcess\0") (ends at 0x40BC) -> pad to 0x40C0
+    # 0xC0: IMAGE_IMPORT_BY_NAME for printf (Hint: 0, Name: "printf\0") (ends at 0x40C9) -> pad to 0x40D0
     
-    dll_name = b'kernel32.dll\0'
-    dll_name += b'\0' * (16 - len(dll_name))
+    idt_entry1 = struct.pack('<IIIII', 0x4050, 0, 0, 0x4090, 0x4060)
+    idt_entry2 = struct.pack('<IIIII', 0x4070, 0, 0, 0x40A0, 0x4080)
+    idt_entry3 = struct.pack('<IIIII', 0, 0, 0, 0, 0)
     
-    hint_name = struct.pack('<H', 0) + b'ExitProcess\0'
-    hint_name += b'\0' * (16 - len(hint_name))
+    ilt_kernel32 = struct.pack('<QQ', 0x40B0, 0)
+    iat_kernel32 = struct.pack('<QQ', 0x40B0, 0)
     
-    idata_data = idt_entry1 + idt_entry2 + b'\0'*8 + ilt + iat + dll_name + hint_name
+    ilt_msvcrt = struct.pack('<QQ', 0x40C0, 0)
+    iat_msvcrt = struct.pack('<QQ', 0x40C0, 0)
+    
+    name_kernel32 = b'kernel32.dll\0'
+    name_kernel32 += b'\0' * (16 - len(name_kernel32))
+    
+    name_msvcrt = b'msvcrt.dll\0'
+    name_msvcrt += b'\0' * (16 - len(name_msvcrt))
+    
+    hint_exitproc = struct.pack('<H', 0) + b'ExitProcess\0'
+    hint_exitproc += b'\0' * (16 - len(hint_exitproc))
+    
+    hint_printf = struct.pack('<H', 0) + b'printf\0'
+    hint_printf += b'\0' * (16 - len(hint_printf))
+    
+    idata_data = (
+        idt_entry1 + idt_entry2 + idt_entry3 + b'\0'*20 +
+        ilt_kernel32 + iat_kernel32 +
+        ilt_msvcrt + iat_msvcrt +
+        name_kernel32 + name_msvcrt +
+        hint_exitproc + hint_printf
+    )
     idata_data += b'\0' * (512 - len(idata_data))
     
     with open(filepath, 'wb') as f:

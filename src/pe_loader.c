@@ -188,12 +188,9 @@ __attribute__((ms_abi)) static void mock_ExitProcess(uint32_t exit_code) {
     exit((int)exit_code);
 }
 
-__attribute__((ms_abi)) static int mock_printf(const char *format, ...) {
-    va_list args;
-    va_start(args, format);
+__attribute__((ms_abi)) static int mock_printf(const char *format, const char *arg1) {
     printf("[Mock API] printf called: ");
-    int ret = vprintf(format, args);
-    va_end(args);
+    int ret = printf(format, arg1);
     return ret;
 }
 
